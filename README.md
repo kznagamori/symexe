@@ -1,0 +1,2 @@
+# symexe
+Windowsでsymlinkを実現するためのexeファイル
