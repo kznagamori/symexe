@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file symexe.cpp
  * @brief Windows環境変数ラッパープログラム
  *
