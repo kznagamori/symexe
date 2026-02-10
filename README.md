@@ -16,15 +16,18 @@ Windowsでシンボリックリンクのように環境変数を一時的に変�
 - **コードページ変更**: コンソールのコードページを一時的に変更可能
 - **コマンドライン引数の転送**: ラッパーに渡された引数をそのまま実行プログラムに転送
 - **自動復元**: プログラム終了後に環境変数とコードページを自動的に元に戻す
+- **複数起動禁止**: プロセス名またはMutexによる重複起動の防止
 - **Unicode対応**: UNICODEビルドのみサポート
 
 ## ビルド要件
 
-- Visual Studio 2019以降
+- Visual Studio 2019以降、または Visual Studio Build Tools 2022以降
 - Windows SDK
 - C++17以降のサポート
 
 ## ビルド方法
+
+### Visual Studio（IDE）
 
 1. Visual Studioでソリューションファイル `symexe.sln` を開く
 2. ビルド構成を選択（Debug/Release, x64）
@@ -32,6 +35,37 @@ Windowsでシンボリックリンクのように環境変数を一時的に変�
 
 ```
 ビルド > ソリューションのビルド
+```
+
+### Visual Studio Build Tools（コマンドライン）
+
+Visual Studio Build Tools 2022を使用してコマンドラインからビルドできます。
+
+#### Build Toolsのインストール
+
+[Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/ja/visual-cpp-build-tools/) をインストールし、「C++ によるデスクトップ開発」ワークロードを選択してください。
+
+#### ビルド手順
+
+1. 「Developer Command Prompt for VS 2022」または「Developer PowerShell for VS 2022」を開く
+
+2. プロジェクトのディレクトリに移動してビルドを実行
+
+```cmd
+cd path\to\symexe
+msbuild symexe.sln /p:Configuration=Release /p:Platform=x64
+```
+
+ビルド成果物は `x64\Release\symexe.exe` に出力されます。
+
+#### その他のビルド例
+
+```cmd
+rem Debugビルド
+msbuild symexe.sln /p:Configuration=Debug /p:Platform=x64
+
+rem リビルド（クリーン後にビルド）
+msbuild symexe.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild
 ```
 
 ## 使い方
@@ -92,6 +126,10 @@ PATH=C:\Program Files\dotnet\dotnet.exe
 #### [CONFIG] セクション
 - **OPTS**: 設定する環境変数名のリスト（カンマ区切り）
 - **CODEPAGE**: コンソールのコードページ（例: 65001=UTF-8, 932=Shift_JIS）
+- **SINGLE_INSTANCE**: 複数起動禁止の方式（0=無効, 1=プロセス名で検出, 2=Mutexで検出、デフォルト: 0）
+- **SINGLE_INSTANCE_MSG**: 重複検出時のメッセージ表示（0=サイレント, 1=表示、デフォルト: 1）
+- **SINGLE_INSTANCE_EXIT**: 重複検出時の終了コード（デフォルト: 1）
+- **MUTEX_NAME**: Mutex名（SINGLE_INSTANCE=2の場合のみ使用、省略時はINIファイルパスから自動生成）
 
 #### [OPT] セクション
 - **[変数名]**: 各環境変数の値を設定
@@ -153,6 +191,56 @@ C:\tools\
 ```
 
 必要に応じてPATHを切り替えるか、フルパスで実行することで、異なるバージョンを使い分けられます。
+
+### 複数起動禁止の設定
+
+#### プロセス名による重複検出
+
+同名プロセスが既に起動中の場合、2つ目の起動を阻止します。
+
+```ini
+[CONFIG]
+OPTS=DOTNET_ROOT
+CODEPAGE=0
+; プロセス名で複数起動を禁止
+SINGLE_INSTANCE=1
+; 重複時にエラーメッセージを表示
+SINGLE_INSTANCE_MSG=1
+; 重複時の終了コード
+SINGLE_INSTANCE_EXIT=1
+
+[OPT]
+DOTNET_ROOT=C:\Program Files\dotnet
+PATH=C:\Program Files\dotnet
+
+[EXE]
+PATH=C:\Program Files\dotnet\dotnet.exe
+```
+
+#### Mutexによる重複検出
+
+Mutexを使用して、より確実に重複起動を検出します。同じINIファイルを使用するインスタンス同士で排他制御を行います。
+
+```ini
+[CONFIG]
+OPTS=DOTNET_ROOT
+CODEPAGE=0
+; Mutexで複数起動を禁止
+SINGLE_INSTANCE=2
+; 重複時にエラーメッセージを表示
+SINGLE_INSTANCE_MSG=1
+; 重複時の終了コード
+SINGLE_INSTANCE_EXIT=1
+; Mutex名（省略時はINIファイルパスから自動生成）
+MUTEX_NAME=Global\my_dotnet_instance
+
+[OPT]
+DOTNET_ROOT=C:\Program Files\dotnet
+PATH=C:\Program Files\dotnet
+
+[EXE]
+PATH=C:\Program Files\dotnet\dotnet.exe
+```
 
 ## 技術的な詳細
 

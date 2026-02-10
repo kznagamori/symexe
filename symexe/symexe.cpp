@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <functional>
 #include <errno.h>
+#include <tlhelp32.h>  // プロセス列挙用（CreateToolhelp32Snapshot等）
 
 // UNICODEビルドのみサポート
 #ifdef _UNICODE
@@ -34,12 +35,21 @@
 
 // 関数プロトタイプ宣言
 static DWORD GetInitPathW(HMODULE hModule, LPWSTR lpDirName, DWORD nSize);
+static bool IsProcessRunning(const WCHAR* processName);
+static void GenerateMutexName(const WCHAR* iniPath, WCHAR* mutexName, DWORD mutexNameSize);
 
 // 定数定義
 #define MAX_OPTS		(2048)		///< オプション文字列の最大長
 #define MAX_ADD_PATH	(10240)		///< パス文字列の最大長
 
+// 複数起動禁止関連の定数
+#define SINGLE_INSTANCE_DISABLED  0		///< 複数起動禁止なし
+#define SINGLE_INSTANCE_PROCESS   1		///< プロセス名で検出
+#define SINGLE_INSTANCE_MUTEX     2		///< Mutexで検出
+#define MAX_MUTEX_NAME          256		///< Mutex名の最大長
+
 // グローバル変数（静的）
+static HANDLE hMutex = NULL;					///< Mutexハンドル（プログラム終了時にクローズ）
 static WCHAR OldPath[MAX_ADD_PATH] = { 0 };		///< 元のPATH環境変数
 static WCHAR AddPath[MAX_ADD_PATH] = { 0 };		///< 追加するPATH
 static WCHAR Path[MAX_ADD_PATH] = { 0 };			///< 作業用PATHバッファ
@@ -169,6 +179,65 @@ int wmain(int argCount, wchar_t* argValue[])
 		return __LINE__;
 	}
 
+	// [CONFIG]セクションから複数起動禁止設定を取得
+	int SingleInstance = GetPrivateProfileIntW(L"CONFIG", L"SINGLE_INSTANCE", SINGLE_INSTANCE_DISABLED, InitPath);
+	int SingleInstanceMsg = GetPrivateProfileIntW(L"CONFIG", L"SINGLE_INSTANCE_MSG", 1, InitPath);
+	int SingleInstanceExit = GetPrivateProfileIntW(L"CONFIG", L"SINGLE_INSTANCE_EXIT", 1, InitPath);
+	WCHAR MutexName[MAX_MUTEX_NAME] = { 0 };
+	GetPrivateProfileStringW(L"CONFIG", L"MUTEX_NAME", L"", MutexName, SIZEOF(MutexName), InitPath);
+
+	/* ========================================
+	 * 3.5. 複数起動禁止チェック
+	 * ======================================== */
+
+	if (SingleInstance == SINGLE_INSTANCE_PROCESS)
+	{
+		// プロセス名による重複検出
+		WCHAR exeDrive[_MAX_DRIVE];
+		WCHAR exeDir[_MAX_DIR];
+		WCHAR exeFname[_MAX_FNAME];
+		WCHAR exeExt[_MAX_EXT];
+		_wsplitpath_s(ExePath, exeDrive, SIZEOF(exeDrive), exeDir, SIZEOF(exeDir), exeFname, SIZEOF(exeFname), exeExt, SIZEOF(exeExt));
+
+		WCHAR exeFileName[MAX_PATH + 1] = { 0 };
+		wcscpy_s(exeFileName, exeFname);
+		wcscat_s(exeFileName, exeExt);
+
+		if (IsProcessRunning(exeFileName))
+		{
+			if (SingleInstanceMsg == 1)
+			{
+				fwprintf(stderr, L"Error: %s is already running.\n", exeFileName);
+			}
+			return SingleInstanceExit;
+		}
+	}
+	else if (SingleInstance == SINGLE_INSTANCE_MUTEX)
+	{
+		// Mutexによる重複検出
+		WCHAR mutexNameBuf[MAX_MUTEX_NAME] = { 0 };
+		if (MutexName[0] == L'\0')
+		{
+			GenerateMutexName(InitPath, mutexNameBuf, SIZEOF(mutexNameBuf));
+		}
+		else
+		{
+			wcscpy_s(mutexNameBuf, MutexName);
+		}
+
+		hMutex = CreateMutexW(NULL, FALSE, mutexNameBuf);
+		if (GetLastError() == ERROR_ALREADY_EXISTS)
+		{
+			if (SingleInstanceMsg == 1)
+			{
+				fwprintf(stderr, L"Error: Another instance is already running (Mutex: %s).\n", mutexNameBuf);
+			}
+			CloseHandle(hMutex);
+			hMutex = NULL;
+			return SingleInstanceExit;
+		}
+	}
+
 	/* ========================================
 	 * 4. 現在の環境変数を保存
 	 * ======================================== */
@@ -286,6 +355,14 @@ int wmain(int argCount, wchar_t* argValue[])
 	CloseHandle(pi.hProcess);
 	CloseHandle(pi.hThread);
 
+	// Mutexのクリーンアップ
+	if (hMutex != NULL)
+	{
+		ReleaseMutex(hMutex);
+		CloseHandle(hMutex);
+		hMutex = NULL;
+	}
+
 	// 実行したプログラムの終了コードを返す
 	return ExitCode;
 }
@@ -333,4 +410,77 @@ static DWORD GetInitPathW(HMODULE hModule, LPWSTR lpDirName, DWORD nSize)
 
 	// 生成されたパスの長さを返す
 	return lstrlenW(lpDirName);
+}
+
+/**
+ * @brief 指定されたプロセス名のプロセスが既に実行中かどうかを確認
+ *
+ * CreateToolhelp32Snapshotを使用してシステム上の全プロセスを列挙し、
+ * 指定されたプロセス名と一致するプロセスが存在するかを調べます。
+ * 自身のプロセスIDは除外します。
+ *
+ * @param processName 検索するプロセス名（例: "dotnet.exe"）
+ * @return bool 同名のプロセスが実行中の場合true、それ以外はfalse
+ */
+static bool IsProcessRunning(const WCHAR* processName)
+{
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (hSnapshot == INVALID_HANDLE_VALUE)
+	{
+		return false;
+	}
+
+	DWORD currentPid = GetCurrentProcessId();
+	PROCESSENTRY32W pe32;
+	pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+	if (!Process32FirstW(hSnapshot, &pe32))
+	{
+		CloseHandle(hSnapshot);
+		return false;
+	}
+
+	do
+	{
+		// 自身のプロセスは除外
+		if (pe32.th32ProcessID == currentPid)
+		{
+			continue;
+		}
+
+		// プロセス名を大文字小文字を区別せずに比較
+		if (_wcsicmp(pe32.szExeFile, processName) == 0)
+		{
+			CloseHandle(hSnapshot);
+			return true;
+		}
+	} while (Process32NextW(hSnapshot, &pe32));
+
+	CloseHandle(hSnapshot);
+	return false;
+}
+
+/**
+ * @brief INIファイルのパスからMutex名を自動生成
+ *
+ * INIファイルのフルパスをベースに一意なMutex名を生成します。
+ * パス内のバックスラッシュを_に置換し、"Global\symexe_"プレフィックスを付けます。
+ * 例: C:\tools\dotnet.ini → Global\symexe_C:_tools_dotnet.ini
+ *
+ * @param iniPath INIファイルのフルパス
+ * @param mutexName 生成されたMutex名を格納するバッファ
+ * @param mutexNameSize バッファのサイズ（文字数）
+ */
+static void GenerateMutexName(const WCHAR* iniPath, WCHAR* mutexName, DWORD mutexNameSize)
+{
+	std::wstring name = L"Global\\symexe_";
+	std::wstring path = iniPath;
+
+	// バックスラッシュをアンダースコアに置換
+	std::replace(path.begin(), path.end(), L'\\', L'_');
+
+	name += path;
+
+	// バッファサイズを超えないようにコピー
+	wcsncpy_s(mutexName, mutexNameSize, name.c_str(), _TRUNCATE);
 }
