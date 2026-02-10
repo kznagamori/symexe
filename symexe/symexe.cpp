@@ -179,6 +179,10 @@ int wmain(int argCount, wchar_t* argValue[])
 		return __LINE__;
 	}
 
+	// [CONFIG]セクションからコンソール非表示設定を取得
+	// 1の場合、コンソールウィンドウを非表示にする（ダブルクリック起動時向け）
+	int HideConsole = GetPrivateProfileIntW(L"CONFIG", L"HIDE_CONSOLE", 0, InitPath);
+
 	// [CONFIG]セクションから複数起動禁止設定を取得
 	int SingleInstance = GetPrivateProfileIntW(L"CONFIG", L"SINGLE_INSTANCE", SINGLE_INSTANCE_DISABLED, InitPath);
 	int SingleInstanceMsg = GetPrivateProfileIntW(L"CONFIG", L"SINGLE_INSTANCE_MSG", 1, InitPath);
@@ -236,6 +240,15 @@ int wmain(int argCount, wchar_t* argValue[])
 			hMutex = NULL;
 			return SingleInstanceExit;
 		}
+	}
+
+	/* ========================================
+	 * 3.6. コンソール非表示処理
+	 * ======================================== */
+
+	if (HideConsole == 1)
+	{
+		FreeConsole();
 	}
 
 	/* ========================================
@@ -309,7 +322,12 @@ int wmain(int argCount, wchar_t* argValue[])
 
 	// プロセスを作成して実行
 	// TRUE: ハンドルを継承、CREATE_UNICODE_ENVIRONMENT: Unicode環境変数を使用
-	if (!CreateProcessW(NULL, (LPWSTR)Cmd.c_str(), NULL, NULL, TRUE, CREATE_UNICODE_ENVIRONMENT, NULL, NULL, &si, &pi)) {
+	DWORD dwCreationFlags = CREATE_UNICODE_ENVIRONMENT;
+	if (HideConsole == 1)
+	{
+		dwCreationFlags |= CREATE_NO_WINDOW;
+	}
+	if (!CreateProcessW(NULL, (LPWSTR)Cmd.c_str(), NULL, NULL, TRUE, dwCreationFlags, NULL, NULL, &si, &pi)) {
 		_wperror(L"_wsplitpath_s error");
 	}
 
